@@ -1,0 +1,7 @@
+--num_envs 4096
+
+--engine_config data/engines/newton_engine.yaml
+--env_config data/envs/amp_location_go2_env.yaml
+--agent_config data/agents/amp_task_go2_agent.yaml
+
+--out_dir output/
