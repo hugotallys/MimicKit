@@ -1,0 +1,26 @@
+# All Go2 clips, weighted so each GAIT CLASS gets equal sampling probability (25% each).
+# Weights are per-clip sampling probabilities (not length-normalized), used both for
+# reference-state init (rand_reset) and for discriminator demo samples. Balancing per gait
+# makes the reference distribution uniform over gaits, so any gait imbalance in the policy
+# can be attributed to mode collapse rather than to dataset imbalance.
+#
+#   gait   clips                     mean root speed
+#   walk   walk0..walk3 (4 clips)    0.9 - 1.4 m/s
+#   pace   pace                      1.1 m/s
+#   trot   trot                      1.9 m/s
+#   run    run                       3.0 m/s
+motions:
+  - file: "data/motions/go2/go2_walk0.pkl"
+    weight: 0.25
+  - file: "data/motions/go2/go2_walk1.pkl"
+    weight: 0.25
+  - file: "data/motions/go2/go2_walk2.pkl"
+    weight: 0.25
+  - file: "data/motions/go2/go2_walk3.pkl"
+    weight: 0.25
+  - file: "data/motions/go2/go2_pace.pkl"
+    weight: 1.0
+  - file: "data/motions/go2/go2_trot.pkl"
+    weight: 1.0
+  - file: "data/motions/go2/go2_run.pkl"
+    weight: 1.0
