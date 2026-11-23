@@ -7,6 +7,9 @@ class ReturnTracker():
         self._episodes = 0
         self._mean_return = torch.zeros([1], device=device, dtype=torch.float32)
         self._mean_ep_len = torch.zeros([1], device=device, dtype=torch.float32)
+        # running mean of the squared returns, kept in float64 so that the std computed from
+        # E[x^2] - E[x]^2 does not lose precision when returns are large
+        self._mean_sq_return = torch.zeros([1], device=device, dtype=torch.float64)
 
         self._return_buf = torch.zeros([num_envs], device=device, dtype=torch.float32)
         self._ep_len_buf = torch.zeros([num_envs], device=device, dtype=torch.long)
@@ -15,6 +18,12 @@ class ReturnTracker():
 
     def get_mean_return(self):
         return self._mean_return
+
+    def get_std_return(self):
+        """Std of the returns of the episodes finished since the last reset (population std)."""
+        mean = self._mean_return.double()
+        var = torch.clamp_min(self._mean_sq_return - mean * mean, 0.0)
+        return torch.sqrt(var).float()
 
     def get_mean_ep_len(self):
         return self._mean_ep_len
@@ -31,6 +40,7 @@ class ReturnTracker():
 
         self._mean_return[:] = 0.0
         self._mean_ep_len[:] = 0.0
+        self._mean_sq_return[:] = 0.0
 
         self._return_buf[:] = 0.0
         self._ep_len_buf[:] = 0
@@ -48,7 +58,9 @@ class ReturnTracker():
         num_resets = len(reset_ids)
 
         if (num_resets > 0):
-            new_mean_return = torch.mean(self._return_buf[reset_ids])
+            new_returns = self._return_buf[reset_ids]
+            new_mean_return = torch.mean(new_returns)
+            new_mean_sq_return = torch.mean(new_returns.double() * new_returns.double())
             new_mean_ep_len = torch.mean(self._ep_len_buf[reset_ids].type(torch.float))
 
             new_count = self._episodes + num_resets
@@ -56,6 +68,7 @@ class ReturnTracker():
             w_old = float(self._episodes) / new_count
 
             self._mean_return = w_new * new_mean_return + w_old * self._mean_return
+            self._mean_sq_return = w_new * new_mean_sq_return + w_old * self._mean_sq_return
             self._mean_ep_len = w_new * new_mean_ep_len + w_old * self._mean_ep_len
             self._episodes += num_resets
 

@@ -244,6 +244,7 @@ class BaseAgent(torch.nn.Module):
         info = {**train_info, **data_info}
         
         info["mean_return"] = self._train_return_tracker.get_mean_return().item()
+        info["std_return"] = self._train_return_tracker.get_std_return().item()
         info["mean_ep_len"] = self._train_return_tracker.get_mean_ep_len().item()
         info["num_eps"] = self._train_return_tracker.get_episodes()
         
@@ -271,6 +272,7 @@ class BaseAgent(torch.nn.Module):
         if (num_episodes == 0):
             test_info = {
                 "mean_return": 0.0,
+                "std_return": 0.0,
                 "mean_ep_len": 0.0,
                 "num_eps": 0
             }
@@ -296,6 +298,7 @@ class BaseAgent(torch.nn.Module):
             test_ep_len = self._test_return_tracker.get_mean_ep_len()
             test_info = {
                 "mean_return": test_return.item(),
+                "std_return": self._test_return_tracker.get_std_return().item(),
                 "mean_ep_len": test_ep_len.item(),
                 "num_eps": self._test_return_tracker.get_episodes()
             }
@@ -364,15 +367,18 @@ class BaseAgent(torch.nn.Module):
         test_eps = mp_util.reduce_sum(test_eps)
 
         self._logger.log("Test_Return", test_return, collection="0_Main")
+        self._logger.log("Test_Return_Std", test_info["std_return"], collection="0_Main", quiet=True)
         self._logger.log("Test_Episode_Length", test_ep_len, collection="0_Main", quiet=True)
         self._logger.log("Test_Episodes", test_eps, collection="1_Info", quiet=True)
 
         train_return = train_info.pop("mean_return")
+        train_return_std = train_info.pop("std_return")
         train_ep_len = train_info.pop("mean_ep_len")
         train_eps = train_info.pop("num_eps")
         train_eps = mp_util.reduce_sum(train_eps)
 
         self._logger.log("Train_Return", train_return, collection="0_Main")
+        self._logger.log("Train_Return_Std", train_return_std, collection="0_Main", quiet=True)
         self._logger.log("Train_Episode_Length", train_ep_len, collection="0_Main", quiet=True)
         self._logger.log("Train_Episodes", train_eps, collection="1_Info", quiet=True)
 
