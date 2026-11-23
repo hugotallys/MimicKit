@@ -786,7 +786,18 @@ class NewtonEngine(engine.Engine):
         key_code = str_to_key_code(key_str)
         assert(key_code not in self._keyboard_callbacks)
         self._keyboard_callbacks[key_code] = callback_func
+        self._camera_blocked_keys.add(key_code)
         return
+
+    def reserve_key(self, key_str):
+        if (self._viewer is not None):
+            self._camera_blocked_keys.add(str_to_key_code(key_str))
+        return
+
+    def is_key_down(self, key_str):
+        if (self._viewer is None):
+            return False
+        return bool(self._raw_is_key_down(str_to_key_code(key_str)))
     
     def _validate_envs(self):
         num_envs = self.get_num_envs()
@@ -998,6 +1009,20 @@ class NewtonEngine(engine.Engine):
             return
         
         self._viewer.renderer.register_key_press(on_keyboard_event)
+
+        # The viewer moves the camera with WASD/QE and the arrow keys, polling renderer.is_key_down.
+        # Keys bound with register_keyboard_callback are hidden from that poll, so a key the env uses
+        # (e.g. WASD for manual steering) does not also move the camera.
+        self._camera_blocked_keys = set()
+        renderer = self._viewer.renderer
+        self._raw_is_key_down = renderer.is_key_down   # unfiltered, used by is_key_down()
+
+        def filtered_is_key_down(symbol):
+            if (symbol in self._camera_blocked_keys):
+                return False
+            return self._raw_is_key_down(symbol)
+
+        renderer.is_key_down = filtered_is_key_down
         return
 
     def _build_ground(self):

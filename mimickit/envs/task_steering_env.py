@@ -20,6 +20,17 @@ class TaskSteeringEnv(smp_env.SMPEnv):
 
         self._reward_steering_vel_scale = float(env_config["reward_steering_vel_scale"])
 
+        # Manual control (visualization only): the target speed and direction come from the keyboard
+        # instead of being resampled at random. Holding W/S changes the speed and holding A/D turns the
+        # target direction, continuously at the rates below (the arrow keys keep moving the camera).
+        # The same command is applied to every env.
+        self._manual_control = env_config.get("manual_control", False) and visualize
+        self._manual_speed_rate = env_config.get("manual_speed_rate", 0.8)            # m/s per second held
+        self._manual_turn_rate = np.deg2rad(env_config.get("manual_turn_rate_deg", 90.0))  # rad per second held
+        self._manual_speed = env_config.get("manual_init_speed", 1.0)
+        self._manual_heading = 0.0
+        self._manual_keys_were_down = False
+
         super().__init__(env_config=env_config, engine_config=engine_config,
                          num_envs=num_envs, device=device, visualize=visualize,
                          record_video=record_video)
@@ -151,7 +162,63 @@ class TaskSteeringEnv(smp_env.SMPEnv):
         self._engine.set_root_ang_vel(env_ids, face_marker_id, 0.0)
         return
     
+    def _setup_gui(self):
+        super()._setup_gui()
+
+        if (self._manual_control):
+            # WASD steers the robot; reserving the keys stops the viewer from also using them for
+            # the camera, which keeps the arrow keys (and Q/E) for moving the camera
+            for k in ["W", "A", "S", "D"]:
+                self._engine.reserve_key(k)
+
+            print("Manual steering (hold the keys): W/S = speed +/- {:.1f} m/s per s, A/D = turn {:.0f} deg per s, "
+                  "speed range [{:.1f}, {:.1f}] m/s; arrows move the camera".format(
+                      self._manual_speed_rate, np.rad2deg(self._manual_turn_rate),
+                      self._tar_speed_min, self._tar_speed_max))
+            self._print_manual_cmd()
+        return
+
+    def _print_manual_cmd(self):
+        print("Command: speed {:.2f} m/s, heading {:+.0f} deg".format(self._manual_speed, np.rad2deg(self._manual_heading)))
+        return
+
+    def _poll_manual_keys(self):
+        """Integrate the held keys over one control step; print the command when the keys are released."""
+        e = self._engine
+        dt = e.get_timestep()
+        fwd = float(e.is_key_down("W")) - float(e.is_key_down("S"))
+        rot = float(e.is_key_down("A")) - float(e.is_key_down("D"))
+        any_down = e.is_key_down("W") or e.is_key_down("S") or e.is_key_down("A") or e.is_key_down("D")
+
+        if (fwd != 0.0):
+            self._manual_speed = float(np.clip(self._manual_speed + fwd * self._manual_speed_rate * dt,
+                                               self._tar_speed_min, self._tar_speed_max))
+        if (rot != 0.0):
+            h = self._manual_heading + rot * self._manual_turn_rate * dt
+            self._manual_heading = float(np.arctan2(np.sin(h), np.cos(h)))
+
+        if (self._manual_keys_were_down and not any_down):
+            self._print_manual_cmd()
+        self._manual_keys_were_down = any_down
+        return
+
+    def _apply_manual_cmd(self, env_ids):
+        n = env_ids.shape[0]
+        d = torch.tensor([np.cos(self._manual_heading), np.sin(self._manual_heading)],
+                         device=self._device, dtype=torch.float)
+        self._tar_speed[env_ids] = self._manual_speed
+        self._tar_dir[env_ids] = d.expand(n, 2)
+        self._face_dir[env_ids] = d.expand(n, 2)
+        return
+
     def _update_task(self):
+        if (self._manual_control):
+            self._poll_manual_keys()
+            self._apply_manual_cmd(self._env_ids)
+            if (self._visualize):
+                self._update_marker(self._env_ids)
+            return
+
         reset_task_mask = self._time_buf >= self._tar_change_times
         rest_env_ids = reset_task_mask.nonzero(as_tuple=False).flatten()
 
@@ -182,6 +249,10 @@ class TaskSteeringEnv(smp_env.SMPEnv):
         return
 
     def _reset_tar(self, env_ids):
+        if (self._manual_control):
+            self._apply_manual_cmd(env_ids)
+            return
+
         n = env_ids.shape[0]
 
         if (self._rand_tar_dir):

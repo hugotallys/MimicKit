@@ -215,6 +215,14 @@ class Engine:
     def register_keyboard_callback(self, key_str, callback_func):
         return
 
+    def reserve_key(self, key_str):
+        """Mark a key as used by the env (the viewer then stops using it for the camera)."""
+        return
+
+    def is_key_down(self, key_str):
+        """True while the key is held down in the viewer window (False without a viewer)."""
+        return False
+
     def enabled_record_video(self):
         return False
   
