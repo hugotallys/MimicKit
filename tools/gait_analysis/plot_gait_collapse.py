@@ -8,6 +8,9 @@ across seeds with a +-1 std band when more than one seed is given.
   Fig. 2  collapse_metrics.png   normalized entropy, JS divergence to the reference, test return
   Fig. 3  footfall_final.png     footfall signature (diagonal - lateral sync vs speed),
                                  reference clips vs final policy (first run)
+  Fig. 4  gait_by_speed.png      steering runs only (needs speed_bins.csv): gait per commanded-speed
+                                 bin at the final checkpoint, commanded vs achieved speed, and the
+                                 mutual information I(command; gait) over training
 
 Usage (from MimicKit/):
   python tools/gait_analysis/plot_gait_collapse.py --runs output/go2_loc_amp_allgaits_s42 [more seeds...] \
@@ -165,6 +168,74 @@ def main():
     fig.tight_layout()
     fig.savefig(os.path.join(args.out, "footfall_final.png"), bbox_inches="tight")
     plt.close(fig)
+
+    # ---------------- Fig. 4: gait vs commanded speed (steering only)
+    sb_path = os.path.join(args.runs[0], "gait_analysis", "speed_bins.csv")
+    if os.path.exists(sb_path):
+        with open(sb_path) as f:
+            sb = list(csv.DictReader(f))
+        last = max(int(r["iter"]) for r in sb)
+        sb = [r for r in sb if int(r["iter"]) == last]
+        fig, axs = plt.subplots(1, 3, figsize=(12.0, 3.4), gridspec_kw={"width_ratios": [1.1, 1.0, 1.0]})
+
+        # (a) stacked bars: gait share per commanded-speed bin, off-manifold in gray
+        xb = np.arange(len(sb))
+        bottom = np.zeros(len(sb))
+        p_off = np.array([float(r["p_off"]) for r in sb])
+        for g in gaits:
+            v = np.nan_to_num(np.array([float(r["p_" + g]) for r in sb])) * (1 - p_off)
+            axs[0].bar(xb, v, bottom=bottom, color=GAIT_COLORS[g], edgecolor="white", lw=0.6, label=LABELS[g])
+            bottom += v
+        axs[0].bar(xb, p_off, bottom=bottom, color=OFF_COLOR, edgecolor="white", lw=0.6, label="off-manifold")
+        axs[0].set_xticks(xb)
+        axs[0].set_xticklabels(["{:.1f}-{:.1f}\n(n={})".format(float(r["v_lo"]), float(r["v_hi"]), r["windows"]) for r in sb],
+                               fontsize=8)
+        axs[0].set_ylim(0, 1)
+        axs[0].set_xlabel("commanded speed (m/s)")
+        axs[0].set_ylabel("fraction of policy windows")
+        axs[0].set_title("Gait per commanded speed (iter {})".format(last), loc="left", color=INK)
+        axs[0].grid(axis="x", visible=False)
+        axs[0].legend(loc="upper left", bbox_to_anchor=(0.0, -0.25), ncol=3, fontsize=8)
+
+        # (b) commanded vs achieved speed, one dot per window, coloured by gait
+        if "final_cmd" in d.files:
+            ok = d["final_cmd_ok"].astype(bool)
+            for i, g in enumerate(gaits):
+                m = ok & d["final_on"] & (d["final_ff"] == i)
+                if m.any():
+                    axs[1].scatter(d["final_cmd"][m], d["final_v_along"][m], s=5, color=GAIT_COLORS[g], alpha=0.35, lw=0)
+            m = ok & ~d["final_on"]
+            if m.any():
+                axs[1].scatter(d["final_cmd"][m], d["final_v_along"][m], s=5, color=OFF_COLOR, alpha=0.35, lw=0)
+            lim = [0, float(d["speed_bins"][-1]) + 0.3]
+            axs[1].plot(lim, lim, color=INK2, lw=0.8, ls="--")
+            axs[1].text(lim[1], lim[1], "achieved = commanded", color=INK2, fontsize=8, ha="right", va="bottom")
+            for v, name in [(1.1, "walk"), (1.9, "trot"), (3.2, "run")]:
+                axs[1].axhline(v, color=INK2, lw=0.6, ls=":")
+                axs[1].text(0.05, v, "ref. " + name, color=INK2, fontsize=7, va="bottom")
+            axs[1].set_xlim(lim)
+            axs[1].set_ylim(lim)
+        axs[1].set_xlabel("commanded speed (m/s)")
+        axs[1].set_ylabel("speed along target direction (m/s)")
+        axs[1].set_title("Speed tracking (1-s windows)", loc="left", color=INK)
+
+        # (c) I(command bin; gait) / H(gait) over training
+        mi = [m for m in mets if "MI_norm" in m]
+        if mi:
+            # MI_norm is undefined (nan) when the policy uses a single gait (H(gait) = 0); that is the
+            # "same gait at every speed" case, so plot it as 0 wherever the MI itself is defined
+            xm, ym = align([m["samples"] for m in mi],
+                           [np.where(np.isfinite(m["MI_cmd_gait"]), np.nan_to_num(m["MI_norm"]), np.nan) for m in mi])
+            band(axs[2], xm / 1e6, ym, GAIT_COLORS["walk_pace"], "policy")
+            axs[2].set_xlim(0, xm[-1] / 1e6)
+        axs[2].set_ylim(0, 1)
+        axs[2].set_xlabel("training samples (M)")
+        axs[2].set_title("I(command; gait) / H(gait)", loc="left", color=INK)
+        axs[2].text(0.02, 0.92, "0 = same gait at every speed\n1 = speed fully determines gait",
+                    transform=axs[2].transAxes, color=INK2, fontsize=8, va="top")
+        fig.tight_layout()
+        fig.savefig(os.path.join(args.out, "gait_by_speed.png"), bbox_inches="tight")
+        plt.close(fig)
 
     print("Saved figures to", args.out)
 

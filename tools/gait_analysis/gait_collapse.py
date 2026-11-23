@@ -26,6 +26,17 @@ Metrics per checkpoint:
   off_manifold fraction of windows far from all reference motion
   knn_agree   agreement between footfall and kNN labels
 
+Commanded speed (steering env only, where each env has its own random target speed):
+  Only windows whose command was constant for the whole window plus --settle_sec before it are used,
+  so transitions right after a target change do not count. Windows are grouped by commanded speed
+  into the bins of --speed_bins.
+  speed_bins.csv  per checkpoint and bin: p(g) over on-manifold windows, p_off, commanded speed,
+                  velocity along the target direction, velocity error (commanded - achieved)
+  MI_cmd_gait     mutual information I(speed bin; gait) in bits over on-manifold windows
+                  (0 = the gait does not depend on the command, i.e. one gait for every speed)
+  MI_norm         MI / H(gait): fraction of the gait uncertainty explained by the command
+  v_abs_err       mean |commanded speed - velocity along the target direction|
+
 Usage (from MimicKit/):
   python tools/gait_analysis/gait_collapse.py --run_dir output/go2_loc_amp_allgaits_s42
 """
@@ -213,10 +224,17 @@ def format_conf(title, conf):
 # policy rollout
 #####################################################################
 
-def rollout(env, agent, num_steps, win_steps, warmup_steps, stride_steps):
+def has_speed_command(env):
+    """True for envs with a per-env target speed (steering); location uses one fixed float."""
+    s = getattr(env, "_tar_speed", None)
+    return isinstance(s, torch.Tensor) and s.dim() == 1 and s.shape[0] == env.get_num_envs()
+
+
+def rollout(env, agent, num_steps, win_steps, warmup_steps, stride_steps, settle_steps=0):
     char_id = env._get_char_id()
     foot_ids = env._key_body_ids
     n, dev, e = env.get_num_envs(), env._device, env._engine
+    use_cmd = has_speed_command(env)
 
     agent.eval()
     agent.set_mode(base_agent.AgentMode.TEST)
@@ -229,10 +247,33 @@ def rollout(env, agent, num_steps, win_steps, warmup_steps, stride_steps):
     curr_ep = torch.zeros(n, device=dev, dtype=torch.long)
     num_falls, num_eps = 0, 0
 
+    if use_cmd:
+        cmd_speed = torch.zeros([n, num_steps], device=dev)    # commanded speed in effect during step t
+        v_along = torch.zeros([n, num_steps], device=dev)      # root velocity along the target direction
+        since_cmd = torch.zeros([n, num_steps], device=dev, dtype=torch.long)
+        curr_since_cmd = torch.zeros(n, device=dev, dtype=torch.long)
+        prev_speed = torch.full([n], -1.0, device=dev)
+        prev_dir = torch.zeros([n, 2], device=dev)
+
     with torch.no_grad():
         for t in range(num_steps):
+            if use_cmd:
+                # command seen by the policy for this step (it is resampled inside env.step or on reset;
+                # a reset always resamples it, so a new episode also restarts the counter)
+                speed_t = env._tar_speed.clone()
+                dir_t = env._tar_dir.clone()
+                changed = (speed_t != prev_speed) | (dir_t != prev_dir).any(-1)
+                curr_since_cmd[changed] = 0
+                prev_speed, prev_dir = speed_t, dir_t
+
             action, _ = agent._decide_action(obs, info)
             obs, _, done, info = env.step(action)
+
+            if use_cmd:
+                curr_since_cmd += 1
+                cmd_speed[:, t] = speed_t
+                since_cmd[:, t] = curr_since_cmd
+                v_along[:, t] = (e.get_root_vel(char_id)[:, :2] * dir_t).sum(-1)
 
             f = step_features(e.get_root_pos(char_id), e.get_root_rot(char_id), e.get_root_vel(char_id),
                               e.get_dof_pos(char_id), e.get_body_pos(char_id)[:, foot_ids, :])
@@ -259,8 +300,15 @@ def rollout(env, agent, num_steps, win_steps, warmup_steps, stride_steps):
     offs = torch.arange(-win_steps + 1, 1, device=dev)
     windows = hist[env_idx[:, None], end_t[:, None] + offs[None, :]]
 
-    return {"windows": windows, "env": env_idx, "end": end_t, "ep": ep_id[env_idx, end_t],
-            "falls": num_falls, "episodes": num_eps + n}
+    out = {"windows": windows, "env": env_idx, "end": end_t, "ep": ep_id[env_idx, end_t],
+           "falls": num_falls, "episodes": num_eps + n}
+    if use_cmd:
+        idx = (env_idx[:, None], end_t[:, None] + offs[None, :])
+        out["cmd"] = cmd_speed[idx].mean(1)
+        out["v_along"] = v_along[idx].mean(1)
+        # command constant over the whole window and for settle_steps before it
+        out["cmd_ok"] = since_cmd[env_idx, end_t] >= win_steps + settle_steps
+    return out
 
 
 #####################################################################
@@ -298,6 +346,41 @@ def switches_per_min(pred, env_idx, ep, end, stride_steps, dt, smooth=5):
     return 60.0 * total_sw / max(total_time, 1e-6)
 
 
+def mutual_info(a, b, na, nb):
+    """Plug-in mutual information I(a; b) in bits and the entropy H(b) in bits, for integer labels."""
+    if len(a) == 0:
+        return float("nan"), float("nan")
+    joint = np.zeros((na, nb))
+    np.add.at(joint, (a, b), 1.0)
+    joint /= joint.sum()
+    pa, pb = joint.sum(1), joint.sum(0)
+    nz = joint > 0
+    mi = float((joint[nz] * np.log2(joint[nz] / (pa[:, None] * pb[None, :])[nz])).sum())
+    hb = float(-(pb[pb > 0] * np.log2(pb[pb > 0])).sum())
+    return mi, hb
+
+
+def speed_bin_rows(it, edges, cmd, v_along, ff, on):
+    """One row per commanded-speed bin: p_* over on-manifold windows, p_off over all windows of the bin."""
+    nan = float("nan")
+    rows = []
+    b = np.clip(np.digitize(cmd, edges) - 1, 0, len(edges) - 2)
+    for i in range(len(edges) - 1):
+        m = b == i
+        mo = m & on
+        p = np.bincount(ff[mo], minlength=len(GAITS)) / mo.sum() if mo.any() else np.full(len(GAITS), nan)
+        rows.append({
+            "iter": it, "bin": i, "v_lo": edges[i], "v_hi": edges[i + 1], "windows": int(m.sum()),
+            **{"p_" + g: p[k] for k, g in enumerate(GAITS)},
+            "p_off": 1.0 - on[m].mean() if m.any() else nan,
+            "v_cmd": float(cmd[m].mean()) if m.any() else nan,
+            "v_along": float(v_along[m].mean()) if m.any() else nan,
+            "v_err": float((cmd[m] - v_along[m]).mean()) if m.any() else nan,
+            "v_abs_err": float(np.abs(cmd[m] - v_along[m]).mean()) if m.any() else nan,
+        })
+    return rows
+
+
 def iter_of(path):
     return int(re.findall(r"(\d+)", os.path.basename(path))[-1])
 
@@ -329,6 +412,10 @@ def main():
     ap.add_argument("--sub", type=int, default=2, help="temporal subsampling inside a window for the kNN")
     ap.add_argument("--every", type=int, default=1, help="analyse every n-th checkpoint (the last is always included)")
     ap.add_argument("--seed", type=int, default=0)
+    ap.add_argument("--speed_bins", default="0.6,1.3,2.0,2.6,3.2",
+                    help="commanded-speed bin edges in m/s (steering only); reference: walk/pace ~1.1, trot ~1.9, run ~3.2")
+    ap.add_argument("--settle_sec", type=float, default=1.0,
+                    help="ignore windows that start less than this after a target change (steering only)")
     ap.add_argument("--device", default="cuda:0")
     args = ap.parse_args()
 
@@ -348,6 +435,11 @@ def main():
     win_steps = int(round(args.win_sec / dt))
     steps = int(round(args.rollout_sec / dt))
     warmup = int(round(args.warmup_sec / dt))
+    settle = int(round(args.settle_sec / dt))
+    edges = np.array([float(v) for v in args.speed_bins.split(",")])
+    use_cmd = has_speed_command(env)
+    if use_cmd:
+        print("Steering env: recording the commanded speed, bins (m/s):", edges)
     log_samples = samples_by_iter(args.run_dir)
 
     # ---------------- reference + validation
@@ -405,12 +497,12 @@ def main():
     if ckpts[-1] not in sel:
         sel.append(ckpts[-1])
 
-    rows, per_ckpt = [], {}
+    rows, bin_rows, per_ckpt = [], [], {}
     for ck in sel:
         it = iter_of(ck)
         util.set_rand_seed(args.seed)
         agent.load(ck)
-        r = rollout(env, agent, steps, win_steps, warmup, args.stride_steps)
+        r = rollout(env, agent, steps, win_steps, warmup, args.stride_steps, settle)
         if r["windows"].shape[0] == 0:
             print("iter {}: no valid windows".format(it))
             continue
@@ -439,22 +531,41 @@ def main():
             "speed_median": float(np.median(st["speed"].cpu().numpy()[on])) if on.any() else float("nan"),
             "windows": len(ff),
         }
+        extra = {}
+        if use_cmd:
+            cmd, va, ok = r["cmd"].cpu().numpy(), r["v_along"].cpu().numpy(), r["cmd_ok"].cpu().numpy()
+            b = np.clip(np.digitize(cmd, edges) - 1, 0, len(edges) - 2)
+            sel_mi = ok & on
+            mi, hg = mutual_info(b[sel_mi], ff[sel_mi], len(edges) - 1, len(GAITS))
+            row["MI_cmd_gait"] = mi
+            row["MI_norm"] = mi / hg if hg > 0 else float("nan")
+            row["v_abs_err"] = float(np.abs(cmd[ok] - va[ok]).mean()) if ok.any() else float("nan")
+            bin_rows += speed_bin_rows(it, edges, cmd[ok], va[ok], ff[ok], on[ok])
+            extra = {"cmd": cmd, "v_along": va, "cmd_ok": ok}
         rows.append(row)
         print("iter {:5d} | ".format(it) + " ".join("{}={:.2f}".format(g, p[i]) for i, g in enumerate(GAITS)) +
               " | H={:.3f} JS={:.3f} active={} sw/min={:.1f} off={:.2f} agree={:.2f} falls={:.2f} v={:.2f}".format(
                   row["H_norm"], row["JS"], row["active"], row["switch_per_min"], row["off_manifold"],
-                  row["knn_agree"], row["fall_rate"], row["speed_median"]))
-        per_ckpt[it] = {"ff": ff, "on": on, **{k: v.cpu().numpy() for k, v in st.items()}}
+                  row["knn_agree"], row["fall_rate"], row["speed_median"]) +
+              (" | MI={:.3f} bits ({:.0%} of H) |v err|={:.2f}".format(row["MI_cmd_gait"], row["MI_norm"], row["v_abs_err"])
+               if use_cmd else ""))
+        per_ckpt[it] = {"ff": ff, "on": on, **{k: v.cpu().numpy() for k, v in st.items()}, **extra}
 
     with open(os.path.join(out_dir, "metrics.csv"), "w", newline="") as f:
         w = csv.DictWriter(f, fieldnames=list(rows[0].keys()))
         w.writeheader()
         w.writerows(rows)
+    if bin_rows:
+        with open(os.path.join(out_dir, "speed_bins.csv"), "w", newline="") as f:
+            w = csv.DictWriter(f, fieldnames=list(bin_rows[0].keys()))
+            w.writeheader()
+            w.writerows(bin_rows)
 
     last = max(per_ckpt)
     np.savez(os.path.join(out_dir, "windows.npz"), gaits=np.array(GAITS), ref_gait_dist=ref["gait_dist"],
              ref_labels=ref_true, **{"ref_" + k: v.cpu().numpy() for k, v in ref_st.items()},
-             final_iter=last, **{"final_" + k: v for k, v in per_ckpt[last].items()})
+             final_iter=last, speed_bins=edges if use_cmd else np.zeros(0),
+             **{"final_" + k: v for k, v in per_ckpt[last].items()})
     print("Saved to", out_dir)
 
 
