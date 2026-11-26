@@ -1,0 +1,70 @@
+# First DCAMP test: steering + one-hot gait conditioning of the policy and the discriminator
+# (mimickit/envs/gait_cond_steering_env.py). Same as amp_steering_go2_allgaits_env except the
+# gait label and the per-gait target speed.
+env_name: "gait_cond_steering"
+
+char_file: "data/assets/go2/go2.xml"
+camera_mode: "track"
+
+episode_length: 20.0 # seconds
+global_obs: False
+root_height_obs: True
+pose_termination: False
+enable_phase_obs: False
+enable_tar_obs: False
+num_disc_obs_steps: 10
+rand_reset: True
+
+ref_char_offset: [2.0, 0.0, 0.0] # m
+init_pose: [0, 0, 0.27, 0, 0, 0, 0, 0.9, -1.8, 0, 0.9, -1.8, 0, 0.9, -1.8, 0, 0.9, -1.8]
+
+enable_early_termination: True
+key_bodies: ["FR_foot", "FL_foot", "RR_foot", "RL_foot"]
+contact_bodies: ["FR_foot", "FL_foot", "RR_foot", "RL_foot"]
+
+# All Go2 clips, weighted 25% per gait class (see the dataset file)
+motion_file: "data/datasets/dataset_go2_all_gaits.yaml"
+
+# Steering task: a random target direction and speed are resampled every 4-7 s.
+# The speed range covers the reference clips (walk/pace ~1.1, trot ~1.9, run ~3.2 m/s),
+# the target speed is part of the policy observation, and the velocity error is two-sided
+# (too slow and too fast are both penalized), so high target speeds call for faster gaits.
+# Gait conditioning: the commanded class of an episode is the class of the clip drawn at reset (RSI).
+# walk and pace are one class, as in the footfall classifier of tools/gait_analysis.
+gait_classes: ["walk_pace", "trot", "run"]
+gait_clip_classes:        # substring of the clip file name -> class
+  "go2_walk": "walk_pace"
+  "go2_pace": "walk_pace"
+  "go2_trot": "trot"
+  "go2_run": "run"
+gait_speed_ranges:        # target speed drawn inside the range of the commanded class (m/s)
+  walk_pace: [0.6, 1.4]
+  trot: [1.4, 2.2]
+  run: [2.4, 3.2]
+
+rand_tar_dir: True
+rand_face_dir: False      # face the direction of travel
+tar_speed_min: 0.6        # m/s (overall range: marker length and manual control)
+tar_speed_max: 3.2        # m/s
+tar_change_time_min: 4.0  # s
+tar_change_time_max: 7.0  # s
+
+reward_steering_tar_w: 0.7        # velocity tracking
+reward_steering_face_w: 0.3       # facing the target direction
+reward_steering_vel_scale: 0.5    # r = exp(-0.5 * |v_target - v|^2)
+
+# DeepMimic tracking weights (unused by AMP, kept for config compatibility)
+reward_pose_w: 0.5
+reward_vel_w: 0.1
+reward_root_pose_w: 0.15
+reward_root_vel_w: 0.1
+reward_key_pos_w: 0.15
+
+reward_pose_scale: 0.25
+reward_vel_scale: 0.01
+reward_root_pose_scale: 5.0
+reward_root_vel_scale: 1.0
+reward_key_pos_scale: 10.0
+
+engine:
+  ground_contact_height: 0.15 # this is needed for IsaacGym

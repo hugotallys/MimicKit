@@ -1,0 +1,7 @@
+--num_envs 2048
+
+--engine_config data/engines/newton_engine.yaml
+--env_config data/envs/gait_cond_steering_go2_env.yaml
+--agent_config data/agents/gait_cond_amp_go2_2048env_agent.yaml
+
+--out_dir output/
