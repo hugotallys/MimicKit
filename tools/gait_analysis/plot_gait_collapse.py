@@ -49,9 +49,11 @@ def read_metrics(run):
 
 def read_log(run, key):
     with open(os.path.join(run, "log.txt"), newline="") as f:
-        rows = [r.split() for r in re.split(r"[\r\n]+", f.read()) if r.strip()]
-    h = rows[0]
-    data = np.array([[float(x) for x in r] for r in rows[1:] if len(r) == len(h)])
+        lines = [r for r in re.split(r"[\r\n]+", f.read()) if r.strip()]
+    # names are padded to 25 characters; a longer one (Disc_Agent_Logit_Walk_Pace) runs into the next
+    h = re.sub(r"(?<=[a-z0-9])(?=[A-Z])", " ", lines[0]).split()
+    rows = [r.split() for r in lines[1:]]
+    data = np.array([[float(x) for x in r] for r in rows if len(r) == len(h)])
     return data[:, h.index("Samples")], data[:, h.index(key)]
 
 

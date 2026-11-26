@@ -385,13 +385,20 @@ def iter_of(path):
     return int(re.findall(r"(\d+)", os.path.basename(path))[-1])
 
 
+def split_header(line):
+    """Column names of MimicKit's txt log. Names are padded to 25 characters, so a longer name
+    (Disc_Agent_Logit_Walk_Pace) runs into the next one: split where a lowercase letter meets an uppercase."""
+    return re.sub(r"(?<=[a-z0-9])(?=[A-Z])", " ", line).split()
+
+
 def samples_by_iter(run_dir):
     """Iteration -> Samples from the training log.txt (rows are separated by \\r)."""
     path = os.path.join(run_dir, "log.txt")
     if not os.path.exists(path):
         return {}
     with open(path, "r", newline="") as f:
-        rows = [r.split() for r in re.split(r"[\r\n]+", f.read()) if r.strip()]
+        lines = [r for r in re.split(r"[\r\n]+", f.read()) if r.strip()]
+    rows = [split_header(lines[0])] + [r.split() for r in lines[1:]]
     head = rows[0]
     i_it, i_s = head.index("Iteration"), head.index("Samples")
     return {int(r[i_it]): int(float(r[i_s])) for r in rows[1:] if len(r) == len(head)}
