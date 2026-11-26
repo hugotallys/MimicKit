@@ -10,6 +10,8 @@ LOGGER     ?= tb
 OUT        ?= output/go2_amp
 MODEL      ?= $(OUT)/model.pt
 TEST_ENVS  ?= 1
+CLIP       ?= pace
+EXTRA      ?=
 
 ENGINE_CFG  = data/engines/$(ENGINE)_engine.yaml
 RUN         = $(PY) mimickit/run.py
@@ -20,7 +22,7 @@ RUN         = $(PY) mimickit/run.py
 help:
 	@echo Targets:
 	@echo   make check        - verify torch + Warp see the GPU
-	@echo   make view         - play the Go2 reference motion (go2_pace) in the viewer
+	@echo   make view         - play a Go2 reference clip in the viewer (CLIP=walk0..walk3, pace, trot, run)
 	@echo   make train        - train AMP on Go2 headless (NUM_ENVS=$(NUM_ENVS), OUT=$(OUT))
 	@echo   make train-quick  - ~6 minute smoke test (256 envs, 2M samples, output/smoke_test)
 	@echo   make train-view   - train with the viewer on (16 envs, slow, for watching)
@@ -32,9 +34,9 @@ help:
 check:
 	$(PY) -c "import torch, warp as wp; print('torch', torch.__version__, 'cuda', torch.cuda.is_available()); wp.init()"
 
-# Reference clip is set by motion_file in data/envs/view_motion_go2_env.yaml
+# Reference clip chosen by name: make view CLIP=trot   (EXTRA="--devices cpu" on the Mac)
 view:
-	$(RUN) --arg_file args/view_motion_go2_args.txt --engine_config $(ENGINE_CFG) --visualize true
+	$(PY) tools/view_clip.py --clip $(CLIP) --engine_config $(ENGINE_CFG) $(EXTRA)
 
 train:
 	$(RUN) --arg_file args/amp_go2_args.txt --engine_config $(ENGINE_CFG) --num_envs $(NUM_ENVS) --visualize false --logger $(LOGGER) --out_dir $(OUT)
