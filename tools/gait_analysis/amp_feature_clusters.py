@@ -278,9 +278,6 @@ def main():
         for g in range(len(REF)):
             m = fg == g
             ax.scatter(p[m, 0], p[m, 1], s=7, color=pg.GAIT_COLORS[REF[g]], alpha=0.6, lw=0, label=pg.LABELS[REF[g]])
-        wt = walk_trot
-        ax.scatter(p[wt, 0], p[wt, 1], s=14, facecolors="none", edgecolors=pg.GAIT_COLORS["trot"], lw=0.6,
-                   label="trot segments of walk clips (footfall)")
         ax.set_title(titles[name], loc="left", color=pg.INK, fontsize=11)
         ax.set_xlabel("PC1")
         ax.set_ylabel("PC2")
@@ -291,7 +288,7 @@ def main():
     fig.legend(h, l, loc="lower center", bbox_to_anchor=(0.5, -0.06), ncol=4, frameon=False, fontsize=9)
     fig.savefig(os.path.join(args.out_dir, "amp_feature_pca.png"), bbox_inches="tight", dpi=200)
 
-    fig, axs = plt.subplots(1, 3, figsize=(15, 4.2), gridspec_kw={"width_ratios": [1.2, 1, 1]})
+    fig, axs = plt.subplots(1, 2, figsize=(10.5, 4.2), gridspec_kw={"width_ratios": [1.2, 1]})
     p = pcs["micro-code histogram"]
     ccol = ["#2a78d6", "#eb6834", "#1baf7a", "#8a5cd1", "#eda100", "#e87ba4"]
     for i in range(3):
@@ -301,7 +298,7 @@ def main():
     axs[0].set_xticks([]); axs[0].set_yticks([])
     axs[0].set_xlabel("PC1"); axs[0].set_ylabel("PC2")
     axs[0].legend(frameon=False, fontsize=9)
-    for ax, mat, cols, ttl in [(axs[1], cf, REF, "clusters vs clip file"), (axs[2], cl[:, :len(REF)], REF, "clusters vs footfall rule")]:
+    for ax, mat, cols, ttl in [(axs[1], cf, REF, "clusters vs clip file")]:
         frac = mat / mat.sum(0, keepdims=True).clip(min=1)
         ax.imshow(frac, cmap="Blues", vmin=0, vmax=1)
         for i in range(mat.shape[0]):
@@ -309,14 +306,113 @@ def main():
                 ax.text(j, i, "{:.0%}\n({})".format(frac[i, j], int(mat[i, j])), ha="center", va="center", fontsize=8,
                         color="white" if frac[i, j] > 0.6 else pg.INK)
         ax.set_xticks(range(len(cols)))
-        ax.set_xticklabels([pg.LABELS[c] for c in cols])
+        ax.set_xticklabels([pg.LABELS[c] + " clips" for c in cols])
         ax.set_yticks(range(mat.shape[0]))
         ax.set_yticklabels(["cluster {}".format(i) for i in range(mat.shape[0])])
         ax.set_title(ttl + " (column %)", loc="left", color=pg.INK, fontsize=11)
         ax.grid(False)
     fig.tight_layout()
     fig.savefig(os.path.join(args.out_dir, "amp_feature_clusters.png"), bbox_inches="tight", dpi=200)
+
+    # micro codes on the phase rings, and the bag of motion words of a few real 1 s windows
+    micro_fig(args, micro_x, micro_code, win_w, clip, start, fg, names, n, len(offs), dt, pg, plt)
     print("Saved figures to", args.out_dir)
+
+
+def micro_fig(args, micro_x, micro_code, win_w, clip, start, fg, names, n, m, dt, pg, plt):
+    """amp_feature_micro.png: short windows in PCA coloured by micro code (one panel per gait, shared
+    axes), the path of one 1 s walk window along its ring, and the code strips + histograms of four
+    real 1 s windows (two walk windows at different phases, one trot, one run)."""
+    import matplotlib.colors as mcolors
+    K = args.k_micro
+    codes = micro_code.cpu().numpy()
+    gait_of_short = np.repeat(fg, m)
+    w_short = np.repeat(win_w.cpu().numpy(), m)
+    # dominant gait of each code (weighted), and a colour family per gait
+    mass = np.zeros((K, len(REF)))
+    np.add.at(mass, (codes, gait_of_short), w_short)
+    dom = mass.argmax(1)
+    cmaps = {"walk_pace": "Blues", "trot": "Oranges", "run": "Greens"}
+    p2, _ = pca(micro_x, 2)
+    p2 = p2.cpu().numpy()
+    # within each gait, order the codes by their angle on the gait's ring, so colour and number follow the phase
+    colors = np.zeros((K, 4))
+    order = []
+    for g, gname in enumerate(REF):
+        ks = [k for k in range(K) if dom[k] == g]
+        ctr = p2[gait_of_short == g].mean(0)
+        ang = [np.arctan2(*(p2[codes == k].mean(0) - ctr)[::-1]) for k in ks]
+        ks = [k for _, k in sorted(zip(ang, ks))]
+        order += ks
+        cm = plt.get_cmap(cmaps[gname])
+        for i, k in enumerate(ks):
+            colors[k] = cm(0.3 + 0.7 * (i / max(len(ks) - 1, 1)))
+    start_np, clip_np = start.cpu().numpy(), clip.cpu().numpy()
+
+    def win_index(name, t):
+        c = names.index(name)
+        idx = np.nonzero(clip_np == c)[0]
+        return int(idx[np.argmin(np.abs(start_np[idx] - t))])
+
+    walk_clip = [nm for nm in names if gc.GAIT_OF_CLIP[nm] == "walk_pace"][0]
+    trot_clip = [nm for nm in names if gc.GAIT_OF_CLIP[nm] == "trot"][0]
+    run_clip = [nm for nm in names if gc.GAIT_OF_CLIP[nm] == "run"][0]
+    examples = [("walk ({}, t = 2.0 s)".format(walk_clip), win_index(walk_clip, 2.0)),
+                ("walk ({}, t = 2.5 s)".format(walk_clip), win_index(walk_clip, 2.5)),
+                ("trot ({}, t = 0.0 s)".format(trot_clip), win_index(trot_clip, 0.0)),
+                ("run ({}, t = 1.0 s)".format(run_clip), win_index(run_clip, 1.0))]
+
+    fig = plt.figure(figsize=(15, 9.6))
+    gs = fig.add_gridspec(2, 3, height_ratios=[1.15, 1], hspace=0.28, wspace=0.12)
+    lim_x = (p2[:, 0].min() - 1, p2[:, 0].max() + 1)
+    lim_y = (p2[:, 1].min() - 1, p2[:, 1].max() + 1)
+    for g, gname in enumerate(REF):
+        ax = fig.add_subplot(gs[0, g])
+        sel = gait_of_short == g
+        ax.scatter(p2[~sel, 0], p2[~sel, 1], s=3, color="#d9d7d0", lw=0, alpha=0.5)
+        ax.scatter(p2[sel, 0], p2[sel, 1], s=6, c=colors[codes[sel]], lw=0, alpha=0.85)
+        if g == 0:
+            i0 = examples[0][1]
+            path = p2[i0 * m:(i0 + 1) * m]
+            ax.plot(path[:, 0], path[:, 1], "-", color=pg.INK, lw=1.2)
+            ax.scatter(path[0, 0], path[0, 1], s=30, color=pg.INK, zorder=5)
+            ax.annotate("one 1 s window\n(21 short windows)", path[0], xytext=(10, -28), textcoords="offset points",
+                        fontsize=8, color=pg.INK)
+        ax.set_xlim(*lim_x)
+        ax.set_ylim(*lim_y)
+        ax.set_xticks([]); ax.set_yticks([])
+        ax.set_xlabel("PC1"); ax.set_ylabel("PC2")
+        nk = int((dom == g).sum())
+        ax.set_title("{} clips: 0.33 s windows, colour = micro code\n({} codes mostly {})".format(
+            pg.LABELS[gname], nk, pg.LABELS[gname]), loc="left", color=pg.INK, fontsize=10)
+
+    sub = gs[1, :].subgridspec(len(examples), 2, width_ratios=[1.25, 1], hspace=0.65, wspace=0.08)
+    rank = {k: i for i, k in enumerate(order)}
+    hmax = 1.1 * max(np.bincount(codes[i * m:(i + 1) * m], minlength=K).max() for _, i in examples)
+    for r, (lbl, i) in enumerate(examples):
+        cs = codes[i * m:(i + 1) * m]
+        ax = fig.add_subplot(sub[r, 0])
+        for j, k in enumerate(cs):
+            ax.add_patch(plt.Rectangle((j, 0), 0.92, 1, color=colors[k]))
+            ax.text(j + 0.46, 0.5, str(rank[k]), ha="center", va="center", fontsize=6.5,
+                    color="white" if mcolors.rgb_to_hsv(colors[k][:3])[2] < 0.75 else pg.INK)
+        ax.set_xlim(0, m)
+        ax.set_ylim(0, 1)
+        ax.axis("off")
+        ax.set_title(lbl + ": micro code of each 0.33 s window, in time order", loc="left", color=pg.INK, fontsize=9)
+        ax = fig.add_subplot(sub[r, 1])
+        h = np.bincount(cs, minlength=K)[order]
+        ax.bar(np.arange(K), h, color=colors[order], width=0.85)
+        ax.set_xlim(-0.6, K - 0.4)
+        ax.set_ylim(0, hmax)
+        ax.set_yticks([])
+        ax.set_xticks([])
+        for s in ("top", "right", "left"):
+            ax.spines[s].set_visible(False)
+        if r == 0:
+            ax.set_title("histogram over the {} codes (numbered by gait, then by phase)".format(K), loc="left", color=pg.INK, fontsize=9)
+    fig.savefig(os.path.join(args.out_dir, "amp_feature_micro.png"), bbox_inches="tight", dpi=180)
+    plt.close(fig)
 
 
 if __name__ == "__main__":
